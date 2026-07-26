@@ -1,0 +1,13 @@
+# netlify.toml
+# Конфигурация для Netlify
+
+[build]
+  command = "echo 'No build required'"
+  functions = "netlify/functions"
+  publish = "."
+
+# Переадресация для SPA (если понадобится)
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
