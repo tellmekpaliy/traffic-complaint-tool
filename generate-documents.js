@@ -1,13 +1,47 @@
 // netlify/functions/generate-documents.js
 // Эта функция работает на сервере Netlify
 // API ключ Claude хранится в переменной окружения (безопасно)
+// ОПТИМИЗИРОВАНО: Используется кэширование промпта для сокращения расходов
+
+const Anthropic = require("@anthropic-ai/sdk");
+
+// Статичная системная инструкция (кэшируется на 5 минут)
+const SYSTEM_PROMPT = `Ты опытный помощник по составлению жалоб о нарушениях ПДД в Москве.
+
+ЗАДАЧА:
+1. Создать вежливое, четкое письмо компании-перевозчика о нарушении ПДД
+2. Составить официальную жалобу в ГИБДД
+
+ТРЕБОВАНИЯ ДЛЯ ПИСЬМА:
+- От первого лица (граждане, свидетели)
+- Вежливый, но твердый тон
+- Четкие детали: дата, время, адрес, марка авто
+- Ссылка на доказательства (видео/фото)
+- Просьба принять меры
+- Подпись: ФИО, контакты
+
+ТРЕБОВАНИЯ ДЛЯ ЖАЛОБЫ В ГИБДД:
+- Формальный, официальный стиль
+- Четкое описание нарушения ст. 12.15 КоАП РФ (движение по тротуару)
+- Указание на доказательства (видео/фото с метаданными)
+- Просьба привлечь водителя к ответственности
+- Все реквизиты свидетеля
+
+ФОРМАТ ОТВЕТА (обязательно):
+[ПИСЬМО]
+полный текст письма компании
+[КОНЕЦ ПИСЬМА]
+
+[ЖАЛОБА]
+полный текст жалобы в ГИБДД
+[КОНЕЦ ЖАЛОБЫ]`;
 
 exports.handler = async (event, context) => {
   // Проверяем, что это POST запрос
-  if (event.httpMethod !== 'POST') {
+  if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
-      body: JSON.stringify({ error: 'Method not allowed' })
+      body: JSON.stringify({ error: "Method not allowed" }),
     };
   }
 
@@ -15,98 +49,99 @@ exports.handler = async (event, context) => {
     // Парсим данные от клиента
     const data = JSON.parse(event.body);
 
-    // Получаем API ключ из переменной окружения (установлена в Netlify)
+    // Валидация данных
+    if (!data.company || !data.eventDate || !data.address) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({
+          error: "Missing required fields: company, eventDate, address",
+        }),
+      };
+    }
+
+    // Получаем API ключ из переменной окружения
     const apiKey = process.env.CLAUDE_API_KEY;
     
     if (!apiKey) {
       return {
         statusCode: 500,
-        body: JSON.stringify({ error: 'API ключ не настроен на сервере' })
+        body: JSON.stringify({ error: "API ключ не настроен на сервере" }),
       };
     }
 
-    // Формируем промпт для Claude
-    const messageContent = `Создайте два документа на русском языке на основе следующей информации:
+    // Инициализируем SDK с API ключом
+    const client = new Anthropic({
+      apiKey: apiKey,
+    });
+
+    // Динамичные данные пользователя (не кэшируются)
+    const userPrompt = `Составьте два документа по этим данным:
 
 ИНФОРМАЦИЯ О НАРУШЕНИИ:
 - Компания: ${data.company}
-- Дата: ${data.eventDate}
-- Время: ${data.eventTime}
+- Дата нарушения: ${data.eventDate}
+- Время нарушения: ${data.eventTime || "уточнить"}
 - Адрес: ${data.address}
-- Видеодоказательство: ${data.hasMedia}
-- Описание: ${data.description}
+- Доказательство: ${data.hasMedia}
+- Описание нарушения: ${data.description}
 
-ИНФОРМАЦИЯ О СВИДЕТЕЛЕ:
+ДАННЫЕ СВИДЕТЕЛЯ:
 - ФИО: ${data.userName}
 - Адрес: ${data.userAddress}
 - Телефон: ${data.userPhone}
-- Email: ${data.userEmail}
+- Email: ${data.userEmail}`;
 
-ДОКУМЕНТ 1 - ПИСЬМО КОМПАНИИ "${data.company}":
-Создайте формальное деловое письмо компании с требованием расследования нарушения ст. 12.15 КоАП РФ (движение по тротуару). Письмо должно быть твердым, но профессиональным. Упомяните видеодоказательство. Требуйте письменного ответа в течение 3 дней. Намекните на возможность жалобы в ГИБДД.
-
-ДОКУМЕНТ 2 - ЖАЛОБА В ГИБДД МВД ПО Г. МОСКВЕ:
-Создайте официальную жалобу о нарушении ст. 12.15 КоАП РФ (выезд на тротуар). Жалоба должна быть объективной, фактической. Содержать все реквизиты свидетеля, описание нарушения, упоминание видеодоказательства и его метаданных. Четкое требование провести служебное расследование.
-
-Выведите результат в формате:
-[ПИСЬМО]
-...текст письма...
-[КОНЕЦ ПИСЬМА]
-
-[ЖАЛОБА]
-...текст жалобы...
-[КОНЕЦ ЖАЛОБЫ]`;
-
-    // Отправляем запрос в Claude API
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 3000,
-        messages: [{ role: 'user', content: messageContent }],
-      }),
+    // Запрос к Claude с кэшированием системного промпта
+    const response = await client.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 2000,
+      system: [
+        {
+          type: "text",
+          text: SYSTEM_PROMPT,
+          // Кэшируем системный промпт на 5 минут (экономит 90% расходов на него)
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: userPrompt,
+        },
+      ],
     });
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      let errorMessage = 'Claude API Error';
-      if (errorData.error) {
-        errorMessage = errorData.error.message || errorData.error.type || 'Claude API Error';
-      }
-      
-      return {
-        statusCode: response.status,
-        body: JSON.stringify({ error: errorMessage })
-      };
-    }
-
-    const result = await response.json();
-    const fullText = result.content[0].text;
-
     // Парсим результат
+    const fullText = response.content[0].text;
     const letterMatch = fullText.match(/\[ПИСЬМО\]([\s\S]*?)\[КОНЕЦ ПИСЬМА\]/);
     const complaintMatch = fullText.match(/\[ЖАЛОБА\]([\s\S]*?)\[КОНЕЦ ЖАЛОБЫ\]/);
 
-    const letterText = letterMatch ? letterMatch[1].trim() : 'Письмо не сгенерировано';
-    const complaintText = complaintMatch ? complaintMatch[1].trim() : 'Жалоба не сгенерирована';
+    const letterText = letterMatch ? letterMatch[1].trim() : "Письмо не сгенерировано";
+    const complaintText = complaintMatch ? complaintMatch[1].trim() : "Жалоба не сгенерирована";
 
-    // Возвращаем результат клиенту
+    // Возвращаем результат с информацией об использовании токенов
     return {
       statusCode: 200,
       body: JSON.stringify({
         letter: letterText,
-        complaint: complaintText
-      })
+        complaint: complaintText,
+        // Информация об использовании (для контроля расходов)
+        _stats: {
+          input_tokens: response.usage.input_tokens,
+          output_tokens: response.usage.output_tokens,
+          cache_creation_input_tokens: response.usage.cache_creation_input_tokens || 0,
+          cache_read_input_tokens: response.usage.cache_read_input_tokens || 0,
+          cache_active: (response.usage.cache_read_input_tokens || 0) > 0,
+        },
+      }),
     };
-
   } catch (error) {
+    console.error("Error:", error);
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({
+        error: error.message || "Failed to generate documents. Please try again.",
+      }),
     };
   }
 };
